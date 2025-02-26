@@ -14,7 +14,8 @@ from PySide6.QtGui import QDesktopServices
 
 from ..config import (
     DEFAULT_NUM_RECORDS, DEFAULT_CHECK_INTERVAL,
-    DEFAULT_SAVE_DIR, WINDOW_SIZE_RATIO
+    DEFAULT_SAVE_DIR, WINDOW_SIZE_RATIO,
+    RAGFLOW_ENABLED, RAGFLOW_API_URL, RAGFLOW_API_KEY
 )
 from ..core.utils import check_chrome_access, ensure_dir
 from ..core.cache_monitor import ChromeCacheMonitor
@@ -45,6 +46,13 @@ class ChromeHistoryViewer(QMainWindow):
             self.monitor = None
             self.processed_urls: Set[str] = set()
             self._shutting_down = False
+            
+            # 初始化RAGFlow管理器
+            self.ragflow_manager = None
+            if RAGFLOW_ENABLED:
+                logging.info("初始化RAGFlow管理器...")
+                from ..core.ragflow_manager import RAGFlowManager
+                self.ragflow_manager = RAGFlowManager(RAGFLOW_API_URL, RAGFLOW_API_KEY)
             
             # 确保保存目录存在
             logging.info(f"确保保存目录存在: {self.save_dir}")
@@ -161,6 +169,12 @@ class ChromeHistoryViewer(QMainWindow):
         self.stop_button.clicked.connect(self.stop_conversion)
         self.stop_button.setEnabled(False)
         dir_layout.addWidget(self.stop_button)
+        
+        # 添加RAGFlow上传按钮
+        if RAGFLOW_ENABLED:
+            self.upload_button = QPushButton("上传到RAGFlow")
+            self.upload_button.clicked.connect(self.upload_to_ragflow)
+            dir_layout.addWidget(self.upload_button)
         
         dir_layout.addStretch()
         layout.addLayout(dir_layout)
@@ -463,7 +477,60 @@ class ChromeHistoryViewer(QMainWindow):
             self.table.resizeColumnsToContents()
             self.table.scrollToTop()
             
+    def upload_to_ragflow(self) -> None:
+        """上传所有Markdown文件到RAGFlow"""
+        if not self.ragflow_manager:
+            QMessageBox.warning(self, "错误", "RAGFlow未启用，请检查配置。")
+            return
+            
+        try:
+            self.progress_label.setText("正在上传到RAGFlow...")
+            QApplication.processEvents()
+            
+            results = self.ragflow_manager.upload_directory(self.save_dir)
+            
+            # 统计结果
+            total = len(results)
+            success = sum(1 for _, success, _ in results if success)
+            
+            # 显示结果
+            message = f"上传完成！\n成功: {success}/{total}"
+            if success < total:
+                message += "\n\n失败的文件:"
+                for file_path, success, error in results:
+                    if not success:
+                        message += f"\n{os.path.basename(file_path)}: {error}"
+            
+            QMessageBox.information(self, "上传结果", message)
+            self.progress_label.setText(f"RAGFlow上传完成 ({success}/{total})")
+            
+        except Exception as e:
+            error_msg = f"上传到RAGFlow失败: {str(e)}"
+            logging.error(error_msg)
+            QMessageBox.warning(self, "错误", error_msg)
+            self.progress_label.setText("RAGFlow上传失败")
+
     def handle_cache_content(self, url: str, content: str) -> None:
         """处理从缓存获取的内容"""
         if self.downloader:
-            self.downloader.handle_cache_content(url, content) 
+            self.downloader.handle_cache_content(url, content)
+            
+            # 如果RAGFlow已启用，尝试上传新生成的文件
+            if self.ragflow_manager:
+                # 查找对应的文件
+                for row in range(self.table.rowCount()):
+                    if self.table.item(row, 2).text() == url:
+                        title = self.table.item(row, 1).text()
+                        file_name = f"{get_safe_title(title, url)}.md"
+                        file_path = os.path.join(self.save_dir, file_name)
+                        
+                        if os.path.exists(file_path):
+                            try:
+                                success, message = self.ragflow_manager.upload_file(file_path)
+                                if success:
+                                    logging.info(f"文件已上传到RAGFlow: {file_name}")
+                                else:
+                                    logging.error(f"上传到RAGFlow失败: {file_name} - {message}")
+                            except Exception as e:
+                                logging.error(f"处理RAGFlow上传时出错: {str(e)}")
+                        break 

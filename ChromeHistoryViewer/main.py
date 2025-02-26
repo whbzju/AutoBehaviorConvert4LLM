@@ -468,6 +468,12 @@ class WebPageDownloader(QThread):
         self.is_running = False
         self.wait()  # 等待线程结束
 
+    def handle_cache_content(self, url, content):
+        """处理从缓存获取的内容"""
+        print(f"下载器收到缓存内容: {url[:50]}...")
+        if self.is_running:
+            self.save_as_markdown(0, '', url, content, '缓存')
+
 class HistoryMonitor(QThread):
     """监控Chrome历史记录更新的线程"""
     new_records = Signal(list)  # 发送新记录的信号
@@ -748,44 +754,54 @@ class ChromeHistoryViewer(QMainWindow):
             print(f"Error in stop_conversion: {str(e)}")
     
     def start_conversion(self):
-        """开始转换所有记录"""
-        if self.downloader and self.downloader.is_running:
+        """开始转换过程"""
+        if self.downloader:
+            QMessageBox.warning(self, "警告", "已有转换任务正在进行")
             return
-            
-        urls_to_process = []
-        for row in range(self.table.rowCount()):
+        
+        # 获取选中的行
+        selected_rows = set()
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if not selected_rows:
+            QMessageBox.information(self, "提示", "请先选择要转换的记录")
+            return
+        
+        # 收集URL信息
+        urls = []
+        for row in sorted(selected_rows):
             title = self.table.item(row, 1).text()
-            url = self.table.item(row, 2).text()
-            
-            # 检查URL是否已经处理过
-            if url in self.processed_urls:
-                status_item = QTableWidgetItem("已存在")
-                status_item.setBackground(Qt.green)
-                self.table.setItem(row, 0, status_item)
-                continue
-                
-            urls_to_process.append((row, title, url))
-            
-            # 设置初始状态
-            status_item = QTableWidgetItem("等待中")
-            status_item.setBackground(Qt.yellow)
-            self.table.setItem(row, 0, status_item)
+            url = self.table.item(row, 3).text()
+            urls.append((row, title, url))
         
-        # 如果没有需要处理的URL，直接返回
-        if not urls_to_process:
-            self.progress_label.setText("所有页面都已处理完成！")
-            return
+        # 确保保存目录存在
+        save_dir = self.save_dir
+        os.makedirs(save_dir, exist_ok=True)
         
-        # 创建并启动下载线程
-        self.downloader = WebPageDownloader(urls_to_process, self.save_dir, self.cache_monitor)
+        # 初始化缓存监控
+        self.cache_monitor = ChromeCacheMonitor()
+        self.cache_monitor.content_ready.connect(self.handle_cache_content)
+        self.cache_monitor.start()
+        
+        # 等待缓存监控启动
+        time.sleep(1)
+        
+        # 初始化下载器
+        self.downloader = WebPageDownloader(urls, save_dir, self.cache_monitor)
         self.downloader.progress.connect(self.update_total_progress)
         self.downloader.page_finished.connect(self.update_page_status)
         self.downloader.finished.connect(self.conversion_finished)
         
-        self.total_progress_bar.setValue(0)
+        # 更新UI状态
         self.stop_button.setEnabled(True)
+        self.total_progress_bar.setValue(0)
+        self.total_progress_bar.setVisible(True)
+        self.progress_label.setText("正在转换...")
+        
+        # 启动下载线程
         self.downloader.start()
-    
+
     def conversion_finished(self, normal_completion):
         """转换完成的处理"""
         try:
@@ -1060,6 +1076,7 @@ class ChromeHistoryViewer(QMainWindow):
 
     def handle_cache_content(self, url, content):
         """处理从缓存获取的内容"""
+        print(f"主窗口收到缓存内容: {url[:50]}...")
         if self.downloader:
             self.downloader.handle_cache_content(url, content)
 
